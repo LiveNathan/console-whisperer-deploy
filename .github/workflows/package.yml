@@ -48,6 +48,6 @@ jobs:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          command: make copied-site
+          command: make copied-site  # <-- Uploads to GitHub
           signing_key: ${{ secrets.SIGNING_KEY }}
           agree_to_license: 1
