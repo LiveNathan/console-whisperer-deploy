@@ -3,6 +3,16 @@ name: Package with Conveyor
 on:
   repository_dispatch:
     types: [release-agent]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'App version'
+        required: true
+        type: string
+      run_id:
+        description: 'Run ID from private repo'
+        required: true
+        type: string
 
 jobs:
   package:
@@ -14,12 +24,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
         run: |
-          # Download artifact from the private repo's workflow
-          gh run download ${{ github.event.client_payload.run_id }} \
+          # Use workflow_dispatch inputs if available, otherwise use repository_dispatch payload
+          RUN_ID="${{ github.event.inputs.run_id || github.event.client_payload.run_id }}"
+          
+          gh run download $RUN_ID \
             --repo LiveNathan/console-whisperer-system \
             --name jar-artifact \
             --dir target/
-
+      
       - name: Verify JAR was downloaded
         run: |
           if [ ! -f target/*.jar ]; then
@@ -33,7 +45,7 @@ jobs:
       - name: Run Conveyor
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
-          APP_VERSION: ${{ github.event.client_payload.version }}
+          APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
         with:
           signing_key: ${{ secrets.SIGNING_KEY }}
           agree_to_license: 1
