@@ -1,0 +1,29 @@
+name: Package with Conveyor
+
+on:
+  repository_dispatch:
+    types: [release-agent]
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download JAR from private repo
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+        run: |
+          # Download artifact from the private repo's workflow
+          gh run download ${{ github.event.client_payload.run_id }} \
+            --repo LiveNathan/console-whisperer-system \
+            --name jar-artifact \
+            --dir target/
+      
+      - name: Run Conveyor
+        uses: hydraulic-software/conveyor/actions/build@v20.0
+        env:
+          APP_VERSION: ${{ github.event.client_payload.version }}
+        with:
+          signing_key: ${{ secrets.SIGNING_KEY }}
+          agree_to_license: 1
