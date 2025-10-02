@@ -19,6 +19,16 @@ jobs:
             --repo LiveNathan/console-whisperer-system \
             --name jar-artifact \
             --dir target/
+
+      - name: Verify JAR was downloaded
+        run: |
+          if [ ! -f target/*.jar ]; then
+            echo "ERROR: No JAR file found in target/ directory"
+            ls -la target/ || echo "target/ directory doesn't exist"
+            exit 1
+          fi
+          echo "Found JAR file:"
+          ls -la target/*.jar
       
       - name: Run Conveyor
         uses: hydraulic-software/conveyor/actions/build@v20.0
