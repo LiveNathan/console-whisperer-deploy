@@ -46,8 +46,8 @@ jobs:
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}  # Your PAT with full permissions
         with:
-          command: make copied-site  # <-- Uploads to GitHub
+          command: make copied-site  # This was missing before
           signing_key: ${{ secrets.SIGNING_KEY }}
           agree_to_license: 1
