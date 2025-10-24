@@ -49,6 +49,7 @@ jobs:
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
           GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}  # Your PAT with full permissions
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
           command: make copied-site
           signing_key: ${{ secrets.SIGNING_KEY }}
