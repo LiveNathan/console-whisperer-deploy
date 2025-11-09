@@ -50,6 +50,7 @@ jobs:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
           GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}  # Your PAT with full permissions
           VKT: ${{ secrets.VKT }}
+          OAK: ${{ secrets.OAK }}
         with:
           command: make copied-site
           signing_key: ${{ secrets.SIGNING_KEY }}
