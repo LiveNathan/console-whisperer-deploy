@@ -19,7 +19,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Disk usage (debug)
+        run: |
+          echo "=== df -h ==="
+          df -h
+          echo "=== top-level workspace du -sh ==="
+          du -sh . || true
+          echo "=== home du -sh ==="
+          du -sh /home/runner || true
+
+      - name: Runner cleanup (best-effort)
+        run: |
+          # best-effort prune to free ephemeral disk space; non-fatal
+          sudo docker system prune -af --volumes || true
+          sudo rm -rf /home/runner/.cache/* || true
+          rm -rf ~/.cache/* || true
+          sudo rm -rf /tmp/* || true
+          echo "Cleanup finished"
+
       - name: Download JAR from private repo
         env:
           GH_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
@@ -29,11 +47,12 @@ jobs:
           # SOURCE_REPO is optional — prefer inputs or client_payload if provided, otherwise default to the desktop repo
           SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.source_repo || 'LiveNathan/console-whisperer-desktop' }}"
           
+          echo "Downloading artifact from $SOURCE_REPO run $RUN_ID to target/"
           gh run download "$RUN_ID" \
             --repo "$SOURCE_REPO" \
             --name jar-artifact \
             --dir target/
-      
+
       - name: Verify JAR was downloaded
         run: |
           if ! ls target/*.jar >/dev/null 2>&1; then
@@ -41,9 +60,16 @@ jobs:
             ls -la target/ || echo "target/ directory doesn't exist"
             exit 1
           fi
-          echo "Found JAR file:"
+          echo "Found JAR file(s):"
           ls -la target/*.jar
-      
+          
+          # fail fast if artifact is unexpectedly large (example: > 500MB)
+          size=$(stat -c%s target/*.jar || true)
+          if [ -n "$size" ] && [ "$size" -gt $((500*1024*1024)) ]; then
+            echo "ERROR: Downloaded JAR is larger than 500MB (${size} bytes). Aborting to avoid exhausting runner disk."
+            exit 1
+          fi
+
       - name: Run Conveyor
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
@@ -54,3 +80,11 @@ jobs:
           command: make copied-site
           signing_key: ${{ secrets.SIGNING_KEY }}
           agree_to_license: 1
+
+      - name: Post-build cleanup
+        if: always()
+        run: |
+          echo "Removing target/ to free disk"
+          rm -rf target/ || true
+          echo "Post-cleanup disk usage:"
+          df -h || true
