@@ -20,14 +20,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Disk usage (debug)
+      - name: Disk and inode usage (debug)
         run: |
           echo "=== df -h ==="
-          df -h
-          echo "=== top-level workspace du -sh ==="
+          df -h || true
+          echo "=== df -i (inodes) ==="
+          df -i / || df -i || true
+          echo "=== Workspace du -sh ==="
           du -sh . || true
           echo "=== home du -sh ==="
           du -sh /home/runner || true
+
+      - name: Check actions-runner cached/_diag (counts + sizes)
+        run: |
+          echo "cached path: /home/runner/actions-runner/cached"
+          sudo du -sh /home/runner/actions-runner/cached || true
+          sudo du -sh /home/runner/actions-runner/cached/_diag || true
+          echo "file count in cached:"
+          sudo find /home/runner/actions-runner/cached -xdev -type f | wc -l || true
+          echo "file count in _diag:"
+          sudo find /home/runner/actions-runner/cached/_diag -maxdepth 1 -type f | wc -l || true
+          echo "largest files in _diag:"
+          sudo find /home/runner/actions-runner/cached/_diag -maxdepth 1 -type f -printf '%s %p\n' 2>/dev/null | sort -nr | head -n 30 || true
+
+      - name: Runner diag cleanup (best-effort, non-fatal)
+        run: |
+          # Remove old diagnostic logs produced by the actions runner.
+          # This is the most likely target if inodes/diag logs are the problem.
+          if [ -d /home/runner/actions-runner/cached/_diag ]; then
+            echo "Removing files from /home/runner/actions-runner/cached/_diag (best-effort)"
+            sudo rm -rf /home/runner/actions-runner/cached/_diag/* || true
+          else
+            echo "No diag directory found"
+          fi
+          echo "Post-cleanup df -h and df -i"
+          df -h || true
+          df -i / || df -i || true
 
       - name: Runner cleanup (best-effort)
         run: |
@@ -88,3 +116,4 @@ jobs:
           rm -rf target/ || true
           echo "Post-cleanup disk usage:"
           df -h || true
+          df -i / || df -i || true
