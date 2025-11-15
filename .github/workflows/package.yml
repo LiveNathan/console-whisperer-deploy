@@ -26,64 +26,65 @@ jobs:
           df -h || true
           echo "=== df -i (inodes) ==="
           df -i / || df -i || true
-          echo "=== mount info ==="
-          mount | grep ' /home' || mount || true
           echo "=== top-level du -sh ==="
           du -sh . || true
           echo "=== home du -sh ==="
           du -sh /home/runner || true
 
-      - name: Verbose runner diag inspect and cleanup (targeted)
+      - name: Detect and free deleted-but-open files (diagnose + optional kill)
         run: |
-          set -o pipefail
-          DIAG_DIR="/home/runner/actions-runner/cached/_diag"
-          CACHED_DIR="/home/runner/actions-runner/cached"
+          set -euo pipefail
+          CACHED_PREFIX="/home/runner/actions-runner/cached"
+          TMP="/tmp/lsof_deleted_cached.txt"
 
-          echo "=== pre-cleanup: df -h ==="
-          df -h || true
-          echo "=== pre-cleanup: df -i ==="
-          df -i / || df -i || true
+          echo "Listing deleted-but-open files (lsof +L1). This shows files that are deleted from the directory tree but still held open by processes."
+          sudo lsof +L1 2>/dev/null | sed -n '1,200p' || true
 
-          echo "=== cached path sizes ==="
-          sudo du -sh "${CACHED_DIR}" 2>/dev/null || echo "no cached dir"
-          sudo du -sh "${DIAG_DIR}" 2>/dev/null || echo "no diag dir"
+          echo
+          echo "Filtering for files under ${CACHED_PREFIX}:"
+          sudo lsof +L1 2>/dev/null | grep "${CACHED_PREFIX}" || echo "No lsof entries matching ${CACHED_PREFIX}"
 
-          echo "=== file counts ==="
-          sudo find "${CACHED_DIR}" -xdev -type f 2>/dev/null | wc -l || true
-          echo "files in _diag (maxdepth 1):"
-          sudo find "${DIAG_DIR}" -maxdepth 1 -type f 2>/dev/null | wc -l || true
+          echo
+          echo "Collecting PIDs holding files under ${CACHED_PREFIX}..."
+          sudo lsof +L1 2>/dev/null | awk -v prefix="${CACHED_PREFIX}" '
+            $0 ~ prefix { print $2 " " $1 " " $9 }
+          ' | sort -u > "${TMP}" || true
 
-          echo "=== largest files in _diag (pre) ==="
-          sudo find "${DIAG_DIR}" -maxdepth 1 -type f -printf '%s %p\n' 2>/dev/null | sort -nr | head -n 50 || true
-
-          echo "=== recent entries in _diag (pre) ==="
-          sudo ls -la --time-style=full-iso "${DIAG_DIR}" 2>/dev/null | tail -n 80 || true
-
-          echo "=== attempting verbose removal of files in _diag ==="
-          if [ -d "${DIAG_DIR}" ]; then
-            # show and attempt deletion of files individually so we capture errors
-            sudo find "${DIAG_DIR}" -maxdepth 1 -type f -print0 2>/dev/null | xargs -0 -r -n1 -P1 sh -c 'f="$0"; echo "REMOVING: $f"; rm -vf "$f" || echo "FAILED REMOVE: $f (exit:$?)"' 
-            # remove empty dirs if any
-            sudo find "${DIAG_DIR}" -mindepth 1 -type d -print0 2>/dev/null | xargs -0 -r -n1 -P1 sh -c 'd="$0"; echo "RMDIR: $d"; rmdir -v "$d" || echo "FAILED RMDIR: $d (exit:$?)"'
+          if [ ! -s "${TMP}" ]; then
+            echo "No processes found holding deleted files under ${CACHED_PREFIX}."
           else
-            echo "${DIAG_DIR} does not exist"
+            echo "Processes holding files (PID PROCESS FILE):"
+            cat "${TMP}"
+            echo
+
+            echo "Unique PIDs:"
+            awk '{print $1}' "${TMP}" | sort -u | while read -r pid; do
+              echo "---- PID ${pid} ----"
+              ps -p "${pid}" -o pid,uid,user,cmd --no-headers || echo "ps failed for ${pid}"
+            done
+
+            echo
+            echo "KILL PLAN: Will forcibly kill runner-owned processes that hold deleted files under ${CACHED_PREFIX}."
+            echo "This will likely cause this job to fail (intended), but will free kernel-held disk blocks so subsequent runs can write logs."
+
+            # Only kill processes owned by 'runner' (safer); adjust if your runner user differs.
+            awk '{print $1}' "${TMP}" | sort -u | while read -r pid; do
+              owner=$(ps -p "${pid}" -o user= 2>/dev/null || true)
+              cmd=$(ps -p "${pid}" -o cmd= 2>/dev/null || true)
+              echo "PID=${pid} OWNER=${owner} CMD=${cmd}"
+              if [ "${owner}" = "runner" ] || [ "${owner}" = "root" ]; then
+                echo "KILLING PID ${pid} (owner=${owner})"
+                sudo kill -9 "${pid}" || echo "Failed to kill ${pid} (it may have exited already)"
+              else
+                echo "Skipping PID ${pid} (owner=${owner}) — not 'runner' or 'root'"
+              fi
+            done
           fi
 
-          # Also attempt to aggressively remove cached temp files (best-effort)
-          echo "=== attempting removal of cached tmp/tool/temp files (best-effort) ==="
-          sudo rm -rfv /home/runner/actions-runner/_work/_temp/* 2>/dev/null || true
-          sudo rm -rfv /home/runner/actions-runner/_work/_tool/* 2>/dev/null || true
-          sudo rm -rfv /home/runner/.cache/* 2>/dev/null || true
-          sudo rm -rfv /tmp/* 2>/dev/null || true
-
-          echo "=== post-cleanup: df -h ==="
+          echo
+          echo "After killing, show df -h and df -i:"
           df -h || true
-          echo "=== post-cleanup: df -i ==="
           df -i / || df -i || true
-
-          echo "=== post-cleanup cached path sizes ==="
-          sudo du -sh "${CACHED_DIR}" 2>/dev/null || true
-          sudo du -sh "${DIAG_DIR}" 2>/dev/null || true
 
       - name: Download JAR from private repo
         env:
