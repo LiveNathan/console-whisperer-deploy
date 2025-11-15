@@ -26,45 +26,64 @@ jobs:
           df -h || true
           echo "=== df -i (inodes) ==="
           df -i / || df -i || true
-          echo "=== Workspace du -sh ==="
+          echo "=== mount info ==="
+          mount | grep ' /home' || mount || true
+          echo "=== top-level du -sh ==="
           du -sh . || true
           echo "=== home du -sh ==="
           du -sh /home/runner || true
 
-      - name: Check actions-runner cached/_diag (counts + sizes)
+      - name: Verbose runner diag inspect and cleanup (targeted)
         run: |
-          echo "cached path: /home/runner/actions-runner/cached"
-          sudo du -sh /home/runner/actions-runner/cached || true
-          sudo du -sh /home/runner/actions-runner/cached/_diag || true
-          echo "file count in cached:"
-          sudo find /home/runner/actions-runner/cached -xdev -type f | wc -l || true
-          echo "file count in _diag:"
-          sudo find /home/runner/actions-runner/cached/_diag -maxdepth 1 -type f | wc -l || true
-          echo "largest files in _diag:"
-          sudo find /home/runner/actions-runner/cached/_diag -maxdepth 1 -type f -printf '%s %p\n' 2>/dev/null | sort -nr | head -n 30 || true
+          set -o pipefail
+          DIAG_DIR="/home/runner/actions-runner/cached/_diag"
+          CACHED_DIR="/home/runner/actions-runner/cached"
 
-      - name: Runner diag cleanup (best-effort, non-fatal)
-        run: |
-          # Remove old diagnostic logs produced by the actions runner.
-          # This is the most likely target if inodes/diag logs are the problem.
-          if [ -d /home/runner/actions-runner/cached/_diag ]; then
-            echo "Removing files from /home/runner/actions-runner/cached/_diag (best-effort)"
-            sudo rm -rf /home/runner/actions-runner/cached/_diag/* || true
-          else
-            echo "No diag directory found"
-          fi
-          echo "Post-cleanup df -h and df -i"
+          echo "=== pre-cleanup: df -h ==="
           df -h || true
+          echo "=== pre-cleanup: df -i ==="
           df -i / || df -i || true
 
-      - name: Runner cleanup (best-effort)
-        run: |
-          # best-effort prune to free ephemeral disk space; non-fatal
-          sudo docker system prune -af --volumes || true
-          sudo rm -rf /home/runner/.cache/* || true
-          rm -rf ~/.cache/* || true
-          sudo rm -rf /tmp/* || true
-          echo "Cleanup finished"
+          echo "=== cached path sizes ==="
+          sudo du -sh "${CACHED_DIR}" 2>/dev/null || echo "no cached dir"
+          sudo du -sh "${DIAG_DIR}" 2>/dev/null || echo "no diag dir"
+
+          echo "=== file counts ==="
+          sudo find "${CACHED_DIR}" -xdev -type f 2>/dev/null | wc -l || true
+          echo "files in _diag (maxdepth 1):"
+          sudo find "${DIAG_DIR}" -maxdepth 1 -type f 2>/dev/null | wc -l || true
+
+          echo "=== largest files in _diag (pre) ==="
+          sudo find "${DIAG_DIR}" -maxdepth 1 -type f -printf '%s %p\n' 2>/dev/null | sort -nr | head -n 50 || true
+
+          echo "=== recent entries in _diag (pre) ==="
+          sudo ls -la --time-style=full-iso "${DIAG_DIR}" 2>/dev/null | tail -n 80 || true
+
+          echo "=== attempting verbose removal of files in _diag ==="
+          if [ -d "${DIAG_DIR}" ]; then
+            # show and attempt deletion of files individually so we capture errors
+            sudo find "${DIAG_DIR}" -maxdepth 1 -type f -print0 2>/dev/null | xargs -0 -r -n1 -P1 sh -c 'f="$0"; echo "REMOVING: $f"; rm -vf "$f" || echo "FAILED REMOVE: $f (exit:$?)"' 
+            # remove empty dirs if any
+            sudo find "${DIAG_DIR}" -mindepth 1 -type d -print0 2>/dev/null | xargs -0 -r -n1 -P1 sh -c 'd="$0"; echo "RMDIR: $d"; rmdir -v "$d" || echo "FAILED RMDIR: $d (exit:$?)"'
+          else
+            echo "${DIAG_DIR} does not exist"
+          fi
+
+          # Also attempt to aggressively remove cached temp files (best-effort)
+          echo "=== attempting removal of cached tmp/tool/temp files (best-effort) ==="
+          sudo rm -rfv /home/runner/actions-runner/_work/_temp/* 2>/dev/null || true
+          sudo rm -rfv /home/runner/actions-runner/_work/_tool/* 2>/dev/null || true
+          sudo rm -rfv /home/runner/.cache/* 2>/dev/null || true
+          sudo rm -rfv /tmp/* 2>/dev/null || true
+
+          echo "=== post-cleanup: df -h ==="
+          df -h || true
+          echo "=== post-cleanup: df -i ==="
+          df -i / || df -i || true
+
+          echo "=== post-cleanup cached path sizes ==="
+          sudo du -sh "${CACHED_DIR}" 2>/dev/null || true
+          sudo du -sh "${DIAG_DIR}" 2>/dev/null || true
 
       - name: Download JAR from private repo
         env:
@@ -72,9 +91,7 @@ jobs:
         run: |
           # Use workflow_dispatch inputs if available, otherwise use repository_dispatch payload
           RUN_ID="${{ github.event.inputs.run_id || github.event.client_payload.run_id }}"
-          # SOURCE_REPO is optional — prefer inputs or client_payload if provided, otherwise default to the desktop repo
           SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.source_repo || 'LiveNathan/console-whisperer-desktop' }}"
-          
           echo "Downloading artifact from $SOURCE_REPO run $RUN_ID to target/"
           gh run download "$RUN_ID" \
             --repo "$SOURCE_REPO" \
@@ -90,8 +107,6 @@ jobs:
           fi
           echo "Found JAR file(s):"
           ls -la target/*.jar
-          
-          # fail fast if artifact is unexpectedly large (example: > 500MB)
           size=$(stat -c%s target/*.jar || true)
           if [ -n "$size" ] && [ "$size" -gt $((500*1024*1024)) ]; then
             echo "ERROR: Downloaded JAR is larger than 500MB (${size} bytes). Aborting to avoid exhausting runner disk."
@@ -102,7 +117,7 @@ jobs:
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
-          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}  # Your PAT with full permissions
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
           OAK: ${{ secrets.OAK }}
         with:
           command: make copied-site
