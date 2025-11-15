@@ -31,47 +31,43 @@ jobs:
           echo "=== home du -sh ==="
           du -sh /home/runner || true
 
-      - name: Detect and free deleted-but-open files (diagnose + optional kill)
+      - name: Detect & kill processes holding memfd:doublemapper (frees kernel-held space)
         run: |
           set -euo pipefail
-          CACHED_PREFIX="/home/runner/actions-runner/cached"
-          TMP="/tmp/lsof_deleted_cached.txt"
+          TMP="/tmp/memfd_doublemapper_pids.txt"
 
-          echo "Listing deleted-but-open files (lsof +L1). This shows files that are deleted from the directory tree but still held open by processes."
+          echo "Listing deleted-but-open files (lsof +L1):"
           sudo lsof +L1 2>/dev/null | sed -n '1,200p' || true
 
           echo
-          echo "Filtering for files under ${CACHED_PREFIX}:"
-          sudo lsof +L1 2>/dev/null | grep "${CACHED_PREFIX}" || echo "No lsof entries matching ${CACHED_PREFIX}"
+          echo "Filtering for memfd:doublemapper entries:"
+          sudo lsof +L1 2>/dev/null | grep 'memfd:doublemapper' || echo "No memfd:doublemapper entries found"
 
           echo
-          echo "Collecting PIDs holding files under ${CACHED_PREFIX}..."
-          sudo lsof +L1 2>/dev/null | awk -v prefix="${CACHED_PREFIX}" '
-            $0 ~ prefix { print $2 " " $1 " " $9 }
-          ' | sort -u > "${TMP}" || true
+          echo "Collecting PIDs that reference memfd:doublemapper..."
+          sudo lsof +L1 2>/dev/null | awk '/memfd:doublemapper/ {print $2 " " $1 " " $3 " " $9}' | sort -u > "${TMP}" || true
 
           if [ ! -s "${TMP}" ]; then
-            echo "No processes found holding deleted files under ${CACHED_PREFIX}."
+            echo "No processes found holding memfd:doublemapper. Continuing."
           else
-            echo "Processes holding files (PID PROCESS FILE):"
+            echo "Processes holding memfd:doublemapper (PID PROCESS USER FILE):"
             cat "${TMP}"
             echo
-
-            echo "Unique PIDs:"
+            echo "Unique PIDs and owner info:"
             awk '{print $1}' "${TMP}" | sort -u | while read -r pid; do
               echo "---- PID ${pid} ----"
-              ps -p "${pid}" -o pid,uid,user,cmd --no-headers || echo "ps failed for ${pid}"
+              ps -p "${pid}" -o pid,user,uid,cmd --no-headers || echo "ps failed for ${pid}"
             done
 
             echo
-            echo "KILL PLAN: Will forcibly kill runner-owned processes that hold deleted files under ${CACHED_PREFIX}."
-            echo "This will likely cause this job to fail (intended), but will free kernel-held disk blocks so subsequent runs can write logs."
+            echo "KILL PLAN: Will forcibly kill runner-owned processes that hold memfd:doublemapper."
+            echo "This will most likely cause this job to fail (intended), but will free kernel-held blocks so subsequent runs can write logs."
 
-            # Only kill processes owned by 'runner' (safer); adjust if your runner user differs.
             awk '{print $1}' "${TMP}" | sort -u | while read -r pid; do
-              owner=$(ps -p "${pid}" -o user= 2>/dev/null || true)
-              cmd=$(ps -p "${pid}" -o cmd= 2>/dev/null || true)
+              owner=$(ps -p "${pid}" -o user= 2>/dev/null || echo "")
+              cmd=$(ps -p "${pid}" -o cmd= 2>/dev/null || echo "")
               echo "PID=${pid} OWNER=${owner} CMD=${cmd}"
+              # Only kill safe owners: runner or root
               if [ "${owner}" = "runner" ] || [ "${owner}" = "root" ]; then
                 echo "KILLING PID ${pid} (owner=${owner})"
                 sudo kill -9 "${pid}" || echo "Failed to kill ${pid} (it may have exited already)"
@@ -82,7 +78,24 @@ jobs:
           fi
 
           echo
+          echo "Sleep 1s to let kernel release resources..."
+          sleep 1
+
+          echo
           echo "After killing, show df -h and df -i:"
+          df -h || true
+          df -i / || df -i || true
+
+      - name: Remove stale runner diag files (best-effort)
+        if: always()
+        run: |
+          echo "Removing files under /home/runner/actions-runner/cached/_diag (best-effort) and other cached tmp files"
+          sudo rm -rf /home/runner/actions-runner/cached/_diag/* 2>/dev/null || true
+          sudo rm -rf /home/runner/actions-runner/_work/_temp/* 2>/dev/null || true
+          sudo rm -rf /home/runner/actions-runner/_work/_tool/* 2>/dev/null || true
+          sudo rm -rf /home/runner/.cache/* 2>/dev/null || true
+          sudo rm -rf /tmp/* 2>/dev/null || true
+          echo "Post-cleanup df -h:"
           df -h || true
           df -i / || df -i || true
 
@@ -93,6 +106,7 @@ jobs:
           # Use workflow_dispatch inputs if available, otherwise use repository_dispatch payload
           RUN_ID="${{ github.event.inputs.run_id || github.event.client_payload.run_id }}"
           SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.source_repo || 'LiveNathan/console-whisperer-desktop' }}"
+          
           echo "Downloading artifact from $SOURCE_REPO run $RUN_ID to target/"
           gh run download "$RUN_ID" \
             --repo "$SOURCE_REPO" \
@@ -118,7 +132,7 @@ jobs:
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
-          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}  # Your PAT with full permissions
           OAK: ${{ secrets.OAK }}
         with:
           command: make copied-site
