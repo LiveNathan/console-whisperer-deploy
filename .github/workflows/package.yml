@@ -19,100 +19,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Disk and inode usage (debug)
-        run: |
-          echo "=== df -h ==="
-          df -h || true
-          echo "=== df -i (inodes) ==="
-          df -i / || df -i || true
-          echo "=== top-level du -sh ==="
-          du -sh . || true
-          echo "=== home du -sh ==="
-          du -sh /home/runner || true
-
-      - name: Detect & kill processes holding memfd:doublemapper (frees kernel-held space)
-        run: |
-          set -euo pipefail
-          TMP="/tmp/memfd_doublemapper_pids.txt"
-
-          echo "Listing deleted-but-open files (lsof +L1):"
-          sudo lsof +L1 2>/dev/null | sed -n '1,200p' || true
-
-          echo
-          echo "Filtering for memfd:doublemapper entries:"
-          sudo lsof +L1 2>/dev/null | grep 'memfd:doublemapper' || echo "No memfd:doublemapper entries found"
-
-          echo
-          echo "Collecting PIDs that reference memfd:doublemapper..."
-          sudo lsof +L1 2>/dev/null | awk '/memfd:doublemapper/ {print $2 " " $1 " " $3 " " $9}' | sort -u > "${TMP}" || true
-
-          if [ ! -s "${TMP}" ]; then
-            echo "No processes found holding memfd:doublemapper. Continuing."
-          else
-            echo "Processes holding memfd:doublemapper (PID PROCESS USER FILE):"
-            cat "${TMP}"
-            echo
-            echo "Unique PIDs and owner info:"
-            awk '{print $1}' "${TMP}" | sort -u | while read -r pid; do
-              echo "---- PID ${pid} ----"
-              ps -p "${pid}" -o pid,user,uid,cmd --no-headers || echo "ps failed for ${pid}"
-            done
-
-            echo
-            echo "KILL PLAN: Will forcibly kill runner-owned processes that hold memfd:doublemapper."
-            echo "This will most likely cause this job to fail (intended), but will free kernel-held blocks so subsequent runs can write logs."
-
-            awk '{print $1}' "${TMP}" | sort -u | while read -r pid; do
-              owner=$(ps -p "${pid}" -o user= 2>/dev/null || echo "")
-              cmd=$(ps -p "${pid}" -o cmd= 2>/dev/null || echo "")
-              echo "PID=${pid} OWNER=${owner} CMD=${cmd}"
-              # Only kill safe owners: runner or root
-              if [ "${owner}" = "runner" ] || [ "${owner}" = "root" ]; then
-                echo "KILLING PID ${pid} (owner=${owner})"
-                sudo kill -9 "${pid}" || echo "Failed to kill ${pid} (it may have exited already)"
-              else
-                echo "Skipping PID ${pid} (owner=${owner}) — not 'runner' or 'root'"
-              fi
-            done
-          fi
-
-          echo
-          echo "Sleep 1s to let kernel release resources..."
-          sleep 1
-
-          echo
-          echo "After killing, show df -h and df -i:"
-          df -h || true
-          df -i / || df -i || true
-
-      - name: Remove stale runner diag files (best-effort)
-        if: always()
-        run: |
-          echo "Removing files under /home/runner/actions-runner/cached/_diag (best-effort) and other cached tmp files"
-          sudo rm -rf /home/runner/actions-runner/cached/_diag/* 2>/dev/null || true
-          sudo rm -rf /home/runner/actions-runner/_work/_temp/* 2>/dev/null || true
-          sudo rm -rf /home/runner/actions-runner/_work/_tool/* 2>/dev/null || true
-          sudo rm -rf /home/runner/.cache/* 2>/dev/null || true
-          sudo rm -rf /tmp/* 2>/dev/null || true
-          echo "Post-cleanup df -h:"
-          df -h || true
-          df -i / || df -i || true
-
+      
       - name: Download JAR from private repo
         env:
           GH_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
         run: |
           # Use workflow_dispatch inputs if available, otherwise use repository_dispatch payload
           RUN_ID="${{ github.event.inputs.run_id || github.event.client_payload.run_id }}"
+          # SOURCE_REPO is optional — prefer inputs or client_payload if provided, otherwise default to the desktop repo
           SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.source_repo || 'LiveNathan/console-whisperer-desktop' }}"
           
-          echo "Downloading artifact from $SOURCE_REPO run $RUN_ID to target/"
           gh run download "$RUN_ID" \
             --repo "$SOURCE_REPO" \
             --name jar-artifact \
             --dir target/
-
+      
       - name: Verify JAR was downloaded
         run: |
           if ! ls target/*.jar >/dev/null 2>&1; then
@@ -120,14 +41,9 @@ jobs:
             ls -la target/ || echo "target/ directory doesn't exist"
             exit 1
           fi
-          echo "Found JAR file(s):"
+          echo "Found JAR file:"
           ls -la target/*.jar
-          size=$(stat -c%s target/*.jar || true)
-          if [ -n "$size" ] && [ "$size" -gt $((500*1024*1024)) ]; then
-            echo "ERROR: Downloaded JAR is larger than 500MB (${size} bytes). Aborting to avoid exhausting runner disk."
-            exit 1
-          fi
-
+      
       - name: Run Conveyor
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
@@ -138,12 +54,3 @@ jobs:
           command: make copied-site
           signing_key: ${{ secrets.SIGNING_KEY }}
           agree_to_license: 1
-
-      - name: Post-build cleanup
-        if: always()
-        run: |
-          echo "Removing target/ to free disk"
-          rm -rf target/ || true
-          echo "Post-cleanup disk usage:"
-          df -h || true
-          df -i / || df -i || true
