@@ -20,21 +20,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Initial system diagnostics
+        run: |
+          echo "=== Initial System State ==="
+          echo "Disk usage:"
+          df -h
+          echo ""
+          echo "Memory usage:"
+          free -h
+          echo ""
+          echo "Inode usage:"
+          df -i /
+          echo ""
+          echo "Checking for existing memfd files:"
+          lsof +L1 2>/dev/null | grep memfd || echo "No memfd files found"
+          echo ""
+          echo "Runner processes:"
+          ps aux | grep -E "Runner\.(Listener|Worker)" || echo "No runner processes found"
+      
       - name: Download JAR from private repo
         env:
           GH_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
         run: |
           # Use workflow_dispatch inputs if available, otherwise use repository_dispatch payload
           RUN_ID="${{ github.event.inputs.run_id || github.event.client_payload.run_id }}"
-          # SOURCE_REPO is optional — prefer inputs or client_payload if provided, otherwise default to the desktop repo
           SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.source_repo || 'LiveNathan/console-whisperer-desktop' }}"
+          
+          echo "Downloading from repo: $SOURCE_REPO, run: $RUN_ID"
           
           gh run download "$RUN_ID" \
             --repo "$SOURCE_REPO" \
             --name jar-artifact \
             --dir target/
       
-      - name: Verify JAR was downloaded
+      - name: Verify JAR and check size
         run: |
           if ! ls target/*.jar >/dev/null 2>&1; then
             echo "ERROR: No JAR file found in target/ directory"
@@ -42,15 +61,176 @@ jobs:
             exit 1
           fi
           echo "Found JAR file:"
-          ls -la target/*.jar
+          ls -lh target/*.jar
+          echo ""
+          echo "JAR size in bytes:"
+          stat -c%s target/*.jar
+          echo ""
+          echo "MD5 checksum:"
+          md5sum target/*.jar
       
-      - name: Run Conveyor
+      - name: Pre-Conveyor cleanup and diagnostics
+        run: |
+          echo "=== Pre-Conveyor State ==="
+          echo "Disk usage before cleanup:"
+          df -h /
+          echo ""
+          echo "Memory before cleanup:"
+          free -h
+          echo ""
+          echo "Checking for memfd leaks:"
+          MEMFD_COUNT=$(lsof +L1 2>/dev/null | grep -c memfd || echo "0")
+          echo "Found $MEMFD_COUNT memfd entries"
+          if [ "$MEMFD_COUNT" != "0" ]; then
+            echo "Detailed memfd info:"
+            lsof +L1 2>/dev/null | grep memfd | head -10
+          fi
+          echo ""
+          
+          # Clean up any leaked memory from runner processes
+          echo "=== Attempting runner process cleanup ==="
+          CLEANED=false
+          
+          # Check if runner processes exist with memfd files
+          if lsof +L1 2>/dev/null | grep memfd | grep -E "Runner\.(Listener|Worker)" > /dev/null; then
+            echo "Found runner processes with memfd leaks, cleaning up..."
+            
+            # Kill runner processes to free memfd files
+            pkill -f Runner.Worker || true
+            pkill -f Runner.Listener || true
+            CLEANED=true
+            
+            # Wait for cleanup
+            sleep 5
+            
+            echo "After cleanup:"
+            df -h /
+            echo ""
+            echo "Remaining memfd files:"
+            lsof +L1 2>/dev/null | grep memfd || echo "No memfd files found"
+          else
+            echo "No runner memfd leaks detected"
+          fi
+          
+          # Additional cleanup of temp files
+          echo ""
+          echo "Cleaning temp directories:"
+          du -sh /tmp 2>/dev/null || true
+          rm -rf /tmp/* 2>/dev/null || true
+          
+          # Clear package caches if needed
+          sudo apt-get clean 2>/dev/null || true
+          
+          echo ""
+          echo "=== Final pre-Conveyor state ==="
+          echo "Disk:"
+          df -h /
+          echo ""
+          echo "Memory:"
+          free -h
+      
+      - name: Monitor and Run Conveyor
+        env:
+          APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          OAK: ${{ secrets.OAK }}
+        run: |
+          # Create monitoring script
+          cat > monitor.sh << 'EOF'
+          #!/bin/bash
+          echo "Starting resource monitoring..."
+          COUNTER=0
+          while true; do
+            COUNTER=$((COUNTER + 1))
+            echo ""
+            echo "=== Monitor check #$COUNTER at $(date '+%H:%M:%S') ==="
+            echo "Disk usage:"
+            df -h / | tail -1
+            echo "Memory usage:"
+            free -h | grep "^Mem:"
+            echo "Memfd files:"
+            lsof +L1 2>/dev/null | grep -c memfd || echo "0"
+            echo "Top memory processes:"
+            ps aux --sort=-%mem | head -5 | awk '{printf "%-20s %6s %s\n", substr($11, 0, 20), $4"%", $2}'
+            
+            # Check for critical space
+            AVAILABLE=$(df / | tail -1 | awk '{print $4}')
+            if [ "$AVAILABLE" -lt 1000000 ]; then
+              echo "WARNING: Less than 1GB available!"
+              echo "Detailed memfd info:"
+              lsof +L1 2>/dev/null | grep memfd | head -5
+            fi
+            
+            sleep 30
+          done
+          EOF
+          chmod +x monitor.sh
+          
+          # Start monitoring in background
+          ./monitor.sh &
+          MONITOR_PID=$!
+          
+          echo "Starting Conveyor build..."
+          echo "Version: $APP_VERSION"
+          echo "Time: $(date)"
+          
+          # Run Conveyor with timeout
+          timeout 30m conveyor make copied-site || EXIT_CODE=$?
+          
+          # Kill monitor
+          kill $MONITOR_PID 2>/dev/null || true
+          
+          if [ "${EXIT_CODE:-0}" -eq 124 ]; then
+            echo "ERROR: Conveyor build timed out after 30 minutes"
+            exit 1
+          elif [ "${EXIT_CODE:-0}" -ne 0 ]; then
+            echo "ERROR: Conveyor build failed with exit code ${EXIT_CODE}"
+            exit ${EXIT_CODE}
+          fi
+          
+          echo "Conveyor build completed successfully"
+      
+      - name: Alternative Conveyor run (if monitoring fails)
+        if: failure()
         uses: hydraulic-software/conveyor/actions/build@v20.0
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
-          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}  # Your PAT with full permissions
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
           OAK: ${{ secrets.OAK }}
         with:
           command: make copied-site
           signing_key: ${{ secrets.SIGNING_KEY }}
           agree_to_license: 1
+      
+      - name: Post-build diagnostics
+        if: always()
+        run: |
+          echo "=== Post-build diagnostics ==="
+          echo "Final disk state:"
+          df -h
+          echo ""
+          echo "Final memory state:"
+          free -h
+          echo ""
+          echo "Memfd files after build:"
+          lsof +L1 2>/dev/null | grep memfd || echo "No memfd files"
+          echo ""
+          echo "Build artifacts size:"
+          du -sh output/ 2>/dev/null || echo "No output directory"
+          du -sh build/ 2>/dev/null || echo "No build directory"
+          echo ""
+          echo "Largest directories:"
+          du -h / 2>/dev/null | sort -rh | head -20 || true
+          echo ""
+          echo "GitHub workspace size:"
+          du -sh $GITHUB_WORKSPACE
+      
+      - name: Upload diagnostics if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            monitor.log
+            /tmp/*.log
+          retention-days: 7
