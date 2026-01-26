@@ -192,7 +192,7 @@ jobs:
       
       - name: Alternative Conveyor run (if monitoring fails)
         if: failure()
-        uses: hydraulic-software/conveyor/actions/build@v20.0
+        uses: hydraulic-software/conveyor/actions/build@v21.1
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
           GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
