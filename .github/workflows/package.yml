@@ -65,7 +65,7 @@ jobs:
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
           GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
-          OAK: ${{ secrets.OAK }}
+          VKT: ${{ secrets.VKT }}
         with:
           command: make copied-site
           signing_key: ${{ secrets.SIGNING_KEY }}
