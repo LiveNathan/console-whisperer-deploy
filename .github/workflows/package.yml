@@ -28,15 +28,6 @@ jobs:
           echo ""
           echo "Memory usage:"
           free -h
-          echo ""
-          echo "Inode usage:"
-          df -i /
-          echo ""
-          echo "Checking for existing memfd files:"
-          lsof +L1 2>/dev/null | grep memfd || echo "No memfd files found"
-          echo ""
-          echo "Runner processes:"
-          ps aux | grep -E "Runner\.(Listener|Worker)" || echo "No runner processes found"
       
       - name: Download JAR from private repo
         env:
@@ -69,129 +60,7 @@ jobs:
           echo "MD5 checksum:"
           md5sum target/*.jar
       
-      - name: Pre-Conveyor cleanup and diagnostics
-        run: |
-          echo "=== Pre-Conveyor State ==="
-          echo "Disk usage before cleanup:"
-          df -h /
-          echo ""
-          echo "Memory before cleanup:"
-          free -h
-          echo ""
-          echo "Checking for memfd leaks:"
-          MEMFD_COUNT=$(lsof +L1 2>/dev/null | grep -c memfd || echo "0")
-          echo "Found $MEMFD_COUNT memfd entries"
-          if [ "$MEMFD_COUNT" != "0" ]; then
-            echo "Detailed memfd info:"
-            lsof +L1 2>/dev/null | grep memfd | head -10
-          fi
-          echo ""
-          
-          # Clean up any leaked memory from runner processes
-          echo "=== Attempting runner process cleanup ==="
-          CLEANED=false
-          
-          # Check if runner processes exist with memfd files
-          if lsof +L1 2>/dev/null | grep memfd | grep -E "Runner\.(Listener|Worker)" > /dev/null; then
-            echo "Found runner processes with memfd leaks, cleaning up..."
-            
-            # Kill runner processes to free memfd files
-            pkill -f Runner.Worker || true
-            pkill -f Runner.Listener || true
-            CLEANED=true
-            
-            # Wait for cleanup
-            sleep 5
-            
-            echo "After cleanup:"
-            df -h /
-            echo ""
-            echo "Remaining memfd files:"
-            lsof +L1 2>/dev/null | grep memfd || echo "No memfd files found"
-          else
-            echo "No runner memfd leaks detected"
-          fi
-          
-          # Additional cleanup of temp files
-          echo ""
-          echo "Cleaning temp directories:"
-          du -sh /tmp 2>/dev/null || true
-          rm -rf /tmp/* 2>/dev/null || true
-          
-          # Clear package caches if needed
-          sudo apt-get clean 2>/dev/null || true
-          
-          echo ""
-          echo "=== Final pre-Conveyor state ==="
-          echo "Disk:"
-          df -h /
-          echo ""
-          echo "Memory:"
-          free -h
-      
-      - name: Monitor and Run Conveyor
-        env:
-          APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
-          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
-          OAK: ${{ secrets.OAK }}
-        run: |
-          # Create monitoring script
-          cat > monitor.sh << 'EOF'
-          #!/bin/bash
-          echo "Starting resource monitoring..."
-          COUNTER=0
-          while true; do
-            COUNTER=$((COUNTER + 1))
-            echo ""
-            echo "=== Monitor check #$COUNTER at $(date '+%H:%M:%S') ==="
-            echo "Disk usage:"
-            df -h / | tail -1
-            echo "Memory usage:"
-            free -h | grep "^Mem:"
-            echo "Memfd files:"
-            lsof +L1 2>/dev/null | grep -c memfd || echo "0"
-            echo "Top memory processes:"
-            ps aux --sort=-%mem | head -5 | awk '{printf "%-20s %6s %s\n", substr($11, 0, 20), $4"%", $2}'
-            
-            # Check for critical space
-            AVAILABLE=$(df / | tail -1 | awk '{print $4}')
-            if [ "$AVAILABLE" -lt 1000000 ]; then
-              echo "WARNING: Less than 1GB available!"
-              echo "Detailed memfd info:"
-              lsof +L1 2>/dev/null | grep memfd | head -5
-            fi
-            
-            sleep 30
-          done
-          EOF
-          chmod +x monitor.sh
-          
-          # Start monitoring in background
-          ./monitor.sh &
-          MONITOR_PID=$!
-          
-          echo "Starting Conveyor build..."
-          echo "Version: $APP_VERSION"
-          echo "Time: $(date)"
-          
-          # Run Conveyor with timeout
-          timeout 30m conveyor make copied-site || EXIT_CODE=$?
-          
-          # Kill monitor
-          kill $MONITOR_PID 2>/dev/null || true
-          
-          if [ "${EXIT_CODE:-0}" -eq 124 ]; then
-            echo "ERROR: Conveyor build timed out after 30 minutes"
-            exit 1
-          elif [ "${EXIT_CODE:-0}" -ne 0 ]; then
-            echo "ERROR: Conveyor build failed with exit code ${EXIT_CODE}"
-            exit ${EXIT_CODE}
-          fi
-          
-          echo "Conveyor build completed successfully"
-      
-      - name: Alternative Conveyor run (if monitoring fails)
-        if: failure()
+      - name: Run Conveyor
         uses: hydraulic-software/conveyor/actions/build@v21.1
         env:
           APP_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
@@ -212,15 +81,9 @@ jobs:
           echo "Final memory state:"
           free -h
           echo ""
-          echo "Memfd files after build:"
-          lsof +L1 2>/dev/null | grep memfd || echo "No memfd files"
-          echo ""
           echo "Build artifacts size:"
           du -sh output/ 2>/dev/null || echo "No output directory"
           du -sh build/ 2>/dev/null || echo "No build directory"
-          echo ""
-          echo "Largest directories:"
-          du -h / 2>/dev/null | sort -rh | head -20 || true
           echo ""
           echo "GitHub workspace size:"
           du -sh $GITHUB_WORKSPACE
@@ -231,6 +94,5 @@ jobs:
         with:
           name: build-diagnostics
           path: |
-            monitor.log
             /tmp/*.log
           retention-days: 7
